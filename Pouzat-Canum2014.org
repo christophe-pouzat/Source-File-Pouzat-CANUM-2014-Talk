@@ -1,0 +1,857 @@
+#+TITLE: Nonparametric Analysis of Simultaneously Recorded Spike Trains Considered as a Realization of a Multivariate Point Process.
+#+DATE: CANUM: 4 April 2014 
+#+AUTHOR: @@latex:{\large Christophe Pouzat} \\ \vspace{0.2cm} Mathématiques Appliquées à Paris 5 (MAP5) \\ \vspace{0.2cm} Université Paris-Descartes et CNRS UMR 8145 \\ \vspace{0.2cm} \texttt{christophe.pouzat@parisdescartes.fr}@@
+#+OPTIONS:   H:2 toc:nil
+#+LaTeX_CLASS: beamer
+#+LaTeX_CLASS_OPTIONS: [presentation]
+#+LATEX_HEADER: \usepackage[english]{babel}
+#+LaTeX_header: \usepackage{mathtools} 
+#+LATEX_HEADER: \usepackage{fourier}
+#+beamer_header: \usefonttheme{serif}
+#+BEAMER_HEADER: \setbeamercovered{invisible}
+#+BEAMER_HEADER: \AtBeginSection[]{\begin{frame}<beamer>\frametitle{Where are we ?}\tableofcontents[currentsection]\end{frame}}
+#+STARTUP: beamer
+#+COLUMNS: %45ITEM %10BEAMER_ENV(Env) %10BEAMER_ACT(Act) %4BEAMER_COL(Col) %8BEAMER_OPT(Opt)
+#+PROPERTY: header-args:R  :session *CANUM2014-R*
+#+Property: header-args:python :session *CANUM2014-Python* :results pp
+
+** Setup :noexport:
+#+NAME: setup
+#+begin_src R :exports none :results silent :eval no-export
+library(STAR)
+library(locfit)  
+library(Cairo)
+CairoFonts(regular="Fourier:style=Medium",
+           bold="Fourier:style=Bold",
+           italic="Fourier:style=Oblique",
+           bolditalic="Fourier:style=BoldOblique")
+png <- CairoPNG
+#+end_src
+
+#+BEGIN_SRC R :exports none :eval no-export
+J_hat = function(m,
+                 X,
+                 precision=3) {
+    n = length(X)
+    breaks = seq(min(X),max(X),len=m+1)
+    h = breaks[2]-breaks[1]
+    p_hat = hist(X,breaks = breaks, plot=FALSE)$counts/n
+    (2 - (n+1)*sum(p_hat^2))/h/(n-1)
+}
+
+data(e060817spont)
+e060817spontN1_isi = diff(e060817spont[["neuron 1"]])
+mm = 1:500
+CV_e060817spontN1_isi = sapply(mm,function(m) J_hat(m,X=e060817spontN1_isi))
+plot(mm,CV_e060817spontN1_isi,type="l")
+which.min(CV_e060817spontN1_isi)
+e060817spontN1_isi_hist = hist(e060817spontN1_isi,39,plot=FALSE)
+e060817spontN1_S = sapply(e060817spontN1_isi_hist$mids, function(x) sum(e060817spontN1_isi >= x)/length(e060817spontN1_isi))
+e060817spontN1_lambda = e060817spontN1_isi_hist$density/e060817spontN1_S
+e060817spontN1_lambda_se = e060817spontN1_lambda*sqrt(1/e060817spontN1_isi_hist$density+(1-e060817spontN1_S)/e060817spontN1_S/length(e060817spontN1_isi))
+e060817spontN1_lambda_lwr = pmax(e060817spontN1_lambda - 1.96*e060817spontN1_lambda_se,0)
+e060817spontN1_lambda_upr = e060817spontN1_lambda + 1.96*e060817spontN1_lambda_se
+plot(e060817spontN1_isi_hist$mids,e060817spontN1_lambda_upr,type="l",lty=2)
+lines(e060817spontN1_isi_hist$mids,e060817spontN1_lambda,col=2)
+lines(e060817spontN1_isi_hist$mids,e060817spontN1_lambda_lwr,lty=2)
+#+END_SRC
+
+#+RESULTS:
+
+#+BEGIN_SRC elisp :eval no-export :results silent
+  (require 'ox-beamer)
+  (setq org-beamer-outline-frame-options "")
+#+END_SRC
+
+* The Data
+
+** Data's origin
+Viewed "from the outside", neurons generate brief electrical pulses: *the action potentials*
+[[file:BrainProbeData.png]]
+
+Left, the brain of an insect with the recording probe on which 16 electrodes (the bright spots) have been etched. Each probe's branch has a 80 $\mu{}m$ width. Right, 1 sec of data from 4 electrodes. The spikes are the action potentials.
+
+** Spike trains
+After a "rather heavy" pre-processing called *spike sorting*, the *raster plot* representing the spike trains can be built:
+#+name: raster-example
+#+header: :cache yes :width 1000 :height 750
+#+header: :file figs/exemple-raster.png
+#+BEGIN_SRC R :results output graphics :exports results
+data(e060817spont)
+exemple.raster <- lapply(e060817spont,
+                         function(l) l[10 <= l & l <= 20]
+                         )
+par(cex=3,mar=c(5,1,1,1))
+myCol <- c("orangered","brown4","royalblue4")
+plot(c(10,20),c(0,4),
+     xlab="Time (s)",ylab="",
+     axes=FALSE,bty="n",type="n")
+axis(1)
+invisible(sapply(1:length(exemple.raster),
+                 function(i) {
+                     points(exemple.raster[[i]],
+                            rep(i,length(exemple.raster[[i]])),
+                            pch="|",col=myCol[i]
+                            )
+                     text(15,i-0.5,paste("Neuron",i),col=myCol[i])
+                 }
+                 )
+          )
+#+END_SRC
+
+#+RESULTS[08d9aaa91c0ae0b65bf70db53e50e109c8933979]: raster-example
+[[file:figs/exemple-raster.png]]
+
+
+** Modeling spike trains: Why and How?
+- A key working hypothesis in Neurosciences states that the spikes' occurrence times, as opposed to their waveform are the only information carriers between brain region (Adrian and Zotterman, 1926).
+- This hypothesis legitimates and leads to the study of spike trains /per se/.
+- It also encourages the development of models whose goal is to predict the probability of occurrence of a spike at a given time, without necessarily considering the biophysical spike generation mechanisms.
+- In the sequel we will identify spike trains with *point process* / *counting process* realizations.
+
+** A tough case (1) 
+#+name: exemple-de-compteurs-en-regime-spont-complique-1
+#+header: :width 2000 :height 2000 :cache yes
+#+header: :file figs/exemple-de-compteurs-en-regime-spont-complique-1.png
+#+BEGIN_SRC R :exports results :results output graphics
+data(e060824spont)
+e060824spontL <- lapply(e060824spont,
+                        function(l) {
+                            l <- unclass(l)
+                            n <- length(l)
+                            y <- 0:n
+                            stepfun(l,y)
+                        }
+                        )
+par(cex=7,mar=c(5,4,4,1))
+plot(c(floor(min(knots(e060824spontL[[1]]))),
+       ceiling(max(knots(e060824spontL[[1]])))),
+     c(0,length(knots(e060824spontL[[1]]))),
+     col=2,lty=2,type="l",lwd=3,
+     xlab="Time (s)",
+     ylab="Number of events",
+     main="Observed counting process"
+     )
+plot(e060824spontL[[1]],
+     vertical=FALSE,
+     do.points=FALSE,
+     add=TRUE,lwd=5)
+rug(knots(e060824spontL[[1]]))
+#+END_SRC
+
+#+ATTR_LATEX: :width 0.7\textwidth
+#+RESULTS[d4644095252c8838a86708076e1f671648ade14d]: exemple-de-compteurs-en-regime-spont-complique-1
+[[file:figs/exemple-de-compteurs-en-regime-spont-complique-1.png]]
+
+The expected counting process of a homogeneous Poisson process---with the same mean frequency---is shown in dashed red.
+
+** A tough case (2) 
+#+name: exemple-de-compteurs-en-regime-spont-complique-2
+#+header: :width 2000 :height 2000 :cache yes
+#+header: :file figs/exemple-de-compteurs-en-regime-spont-complique-2.png
+#+BEGIN_SRC R :exports results :results output graphics
+e060824spont.isi1 <- diff(e060824spont[[1]])
+e060824spont.r1 <- rank(e060824spont.isi1)
+par(cex=7)
+plot(e060824spont.r1[-length(e060824spont.r1)],
+     e060824spont.r1[-1],
+     xlab="Rank of interval k",
+     ylab="Rank of interval k+1",
+     pch=16)
+#+END_SRC
+
+#+ATTR_LATEX: :width 0.7\textwidth
+#+RESULTS[80e62128b12d5ee73b36b17f08ff353dd3863292]: exemple-de-compteurs-en-regime-spont-complique-2
+[[file:figs/exemple-de-compteurs-en-regime-spont-complique-2.png]]
+
+A renewal process is inadequate here: the rank of successive inter spike intervals *are correlated*.
+
+* Conditional intensity
+
+** Model constraints  
+Our model should give room for:
+- The elapsed time since the last spike of the neuron (enough for homogeneous renewal processes).
+- Variables related to the discharge history---like the duration of the last inter spike interval.
+- The elapsed time since the last spike of a "functionally coupled" neuron.
+- The elapsed time since the beginning of a applied stimulation.
+
+** Filtration, history and conditional intensity
+- Probabilists working on processes use the *filtration* or *history*: a family of increasing sigma algebras, $\left(\mathcal{F}_t\right)_{0\leq t \leq \infty}$, such that all the information related to the process at time $t$ can be represented by an element of $\mathcal{F}_t$.
+- The *conditional intensity* of a counting process $N(t)$ is then defined by: $$ \lambda(t \mid \mathcal{F}_t) \equiv \lim_{h \downarrow 0} \frac{\mathrm{Prob}\{N(t+h)-N(t)=1 \mid \mathcal{F}_t\}}{h} \; .$$
+- $\lambda$ constitutes an *exhaustive description* of process / spike train.     
+
+** Two problems
+As soon as we adopt a conditional intensity based formalism, we must:
+- Find an estimator $\hat{\lambda}$ of $\lambda$.
+- Find goodness of fit tests.
+
+* Time transformation
+** What to do with $\lambda$: A summary
+We start by associating to $\lambda$, the *integrated intensity*: $$ \Lambda = \int_0^{t} \lambda(u \mid \mathcal{F}_u) du \, ,$$ it then easy---but a bit too long for such a brief talk---to show that:
+- *If our model is correct* ($\hat{\lambda} \approx \lambda$), the density of successive spikes after time transformation: $$\{t_1,\ldots,t_n\} \rightarrow \{\Lambda(t_1) = \Lambda_1,\ldots,\Lambda(t_n) = \Lambda_n\}$$ is *exponential with parameter 1*.
+- Stated differently, the point process $\{\Lambda_1,\ldots,\Lambda_n\}$ is *a homogeneous Poisson process with parameter 1*.
+
+The next slides illustrate this result. 
+
+** Time transformation illustration (1)
+#+name: fonctions-pour-illustrer-la-transformation-du-temps
+#+BEGIN_SRC R :exports none :results silent
+set.seed(20061001,kind="Mersenne-Twister")
+
+stimulus <- function(t,
+                     df=5,
+                     tonset=5,
+                     timeFactor=5,
+                     peakFactor=20) {
+    dchisq((t-tonset)*timeFactor,df=df)*peakFactor
+}
+## Define the conditional intensity / hazard function
+hFct <- function(t,
+                 tlast,
+                 df=5,
+                 tonset=5,
+                 timeFactor=5,
+                 peakFactor=20,
+                 mu=0.075,
+                 sigma2=3
+                 ) {
+    
+    hinvgauss(t-tlast,mu=mu,sigma2=sigma2)*exp(stimulus(t,df,tonset,timeFactor,peakFactor))
+    
+}
+## define the function simulating the train with the thinning method
+makeTrain <- function(tstop=10,
+                      peakCI=400,
+                      preTime=5,
+                      df=5,
+                      tonset=4,
+                      timeFactor=5,
+                      peakFactor=20,
+                      mu=0.075,
+                      sigma2=3) {
+    
+    result <- numeric(500) - preTime - .Machine$double.eps
+    result.n <- 500
+    result[1] <- 0
+    idx <- 1
+    currentTime <- result[1]
+    while (currentTime < tstop+preTime) {
+        currentTime <- currentTime+rexp(1,peakCI)
+        p <- hFct(currentTime,
+                  result[idx],
+                  df=df,
+                  tonset=tonset+preTime,
+                  timeFactor=timeFactor,
+                  peakFactor=peakFactor,
+                  mu=mu,
+                  sigma2=sigma2)/peakCI
+        rthreshold <- runif(1)
+        if (p>1) stop("Wrong peakCI")
+        while(p < rthreshold) {
+            currentTime <- currentTime+rexp(1,peakCI)
+            p <- hFct(currentTime,
+                      result[idx],
+                      df=df,
+                      tonset=tonset+preTime,
+                      timeFactor=timeFactor,
+                      peakFactor=peakFactor,
+                      mu=mu,
+                      sigma2=sigma2)/peakCI
+            if (p>1) stop("Wrong peakCI")
+            rthreshold <- runif(1)
+        }
+        idx <- idx+1
+        if (idx > result.n) {
+            result <- c(result,numeric(500)) - preTime - .Machine$double.eps
+            result.n <- result.n + 500
+        }
+        result[idx] <- currentTime
+    }
+    
+    result[preTime < result & result <= tstop+preTime] - preTime
+    
+}
+## Define a function returning the conditional intensity function (cif)
+ciFct <- function(t,
+                  tlast,
+                  df=5,
+                  tonset=4,
+                  timeFactor=5,
+                  peakFactor=20,
+                  mu=0.075,
+                  sigma2=3
+                  ) {
+    
+    sapply(t, function(x) {
+        if (x <= tlast[1]) return(1/mu)
+        y <- x-max(tlast[tlast<x])
+        hinvgauss(y,mu=mu,sigma2=sigma2)*exp(stimulus(x,df,tonset,timeFactor,peakFactor))
+    }
+           )
+    
+}
+## define a function doing the time transformation / rescaling
+## by integrating the cif and returning another CountingProcessSamplePath
+transformCPSP <- function(cpsp,
+                          ciFct,
+                          CIFct,
+                          method=c("integrate","discrete"),
+                          subdivisions=100,
+                          ...
+                          ) {
+    
+    if (!inherits(cpsp,"CountingProcessSamplePath"))
+        stop("cpsp should be a CountingProcessSamplePath objet")
+    st <- cpsp$ppspFct()
+    n <- length(st)
+    from <- cpsp$from
+    to <- cpsp$to
+    if (missing(CIFct)) {
+        if (method[1] == "integrate") {
+            lwr <- c(from,st)
+            upr <- c(st,to)
+            Lambda <- sapply(1:(n+1),
+                             function(idx)
+                             integrate(ciFct,
+                                       lower=lwr[idx],
+                                       upper=upr[idx],
+                                       subdivisions=subdivisions,
+                                       ...)$value
+                             )
+            Lambda <- cumsum(Lambda)
+            st <- Lambda[1:n]
+            from <- 0
+            to <- Lambda[n+1]
+        } ## End of conditional on method[1] == "integrate"
+        if (method[1] == "discrete") {
+            lwr <- c(from,st)
+            upr <- c(st,to)
+            xx <- unlist(lapply(1:(n+1),
+                                function(idx) seq(lwr[idx],
+                                                  upr[idx],
+                                                  length.out=subdivisions)
+                                )
+                         )
+            Lambda <- cumsum(ciFct(xx[-length(xx)])*diff(xx))
+            Lambda <- Lambda - Lambda[1]
+            st <- Lambda[(1:n)*subdivisions]
+            from <- 0
+            to <- Lambda[length(Lambda)]
+        } ## End of conditional on method[1] == "discrete"
+    } else {
+        result <- CIFct(c(from,st,to))
+        result <- result-result[1]
+        from <- result[1]
+        to <- result[n+2]
+        st <- result[2:(n+1)]
+    } ## End of conditional on missing(CIFct)
+    mkCPSP(st,from,to)
+}
+
+t1 <- makeTrain()
+
+lwr <- c(0,t1)
+upr <- c(t1,10)
+xx <- unlist(lapply(1:(length(t1)+1),function(idx) seq(lwr[idx],upr[idx],length.out=100)))
+ll <- ciFct(xx,t1)
+LL <- c(0,cumsum(ll[-1]*diff(xx)))
+cpsp1 <- mkCPSP(t1)
+cpsp1t <- transformCPSP(cpsp1,function(t) ciFct(t,cpsp1$ppspFct()))
+#+END_SRC
+
+#+name: illustration-transformation-du-temps-1
+#+header: :width 2000 :height 1500 :cache yes
+#+header: :file figs/illustration-transformation-du-temps-1.png
+#+BEGIN_SRC R :exports results :results output graphics
+par(cex=5)
+plot(xx,ll,type="n",xlim=c(0,10),ylim=c(0,max(ll)),
+     xlab="Time (s)",ylab="λ(t|F) (Hz)",
+     main="Intensity process and events' sequence")
+invisible(sapply(1:(length(t1)+1),
+                 function(idx)
+                 lines(xx[(2+(idx-1)*100):(idx*100+1)],
+                       ll[(2+(idx-1)*100):(idx*100+1)],
+                       lwd=5,col=2)
+                 )
+          )
+rug(t1,lwd=4)
+#+END_SRC
+
+#+RESULTS[475ea508ff905b3bd977a08317b70b0ddaa17262]: illustration-transformation-du-temps-1
+[[file:figs/illustration-transformation-du-temps-1.png]]
+
+** Time transformation illustration (2)
+#+name: illustration-transformation-du-temps-2
+#+header: :width 2000 :height 1500 :cache yes
+#+header: :file figs/illustration-transformation-du-temps-2.png
+#+BEGIN_SRC R :exports results :results output graphics
+par(cex=5)
+plot(cpsp1,xlab="Time (s)",
+     ylab="N(t) and Λ(t)",
+     ylim=c(0,max(length(t1),max(LL))),
+     main="N and Λ vs t",
+     lwd=5
+     )
+rug(t1,lwd=4)
+lines(xx,LL,col=2,lwd=5)
+#+END_SRC
+
+#+RESULTS[ccd546b18291ac6de28bacad0e3370ede6dcde16]: illustration-transformation-du-temps-2
+[[file:figs/illustration-transformation-du-temps-2.png]]
+
+** Time transformation illustration (3)
+#+name: illustration-transformation-du-temps-3
+#+header: :width 2000 :height 1500 :cache yes
+#+header: :file figs/illustration-transformation-du-temps-3.png
+#+BEGIN_SRC R :exports results :results output graphics
+par(cex=5)
+plot(cpsp1t,xlab="Λ",
+     ylab="N(Λ) and Λ",
+     xlim=c(0,max(length(t1),max(LL))),
+     ylim=c(0,max(length(t1),max(LL))),
+     main="N and Λ vs Λ",
+     lwd=3
+     )
+lines(c(0,max(LL)),c(0,max(LL)),col=2,lwd=5)
+rug(unclass(cpsp1t$ppspFct()),lwd=4)
+#+END_SRC
+
+#+RESULTS[3520c256a0af17fa77796f0e33a90d18e3885b73]: illustration-transformation-du-temps-3
+[[file:figs/illustration-transformation-du-temps-3.png]]
+
+** Ogata's tests
+- If, for a good model, the transformed sequence of spike times, $\{\hat{\Lambda}_1,\ldots,\hat{\Lambda}_n\}$, is the realization of a homogeneous Poisson process with rate 1, we should test $\{\hat{\Lambda}_1,\ldots,\hat{\Lambda}_n\}$ against such a process.
+- This is what Yosihiko Ogata proposed in 1988 (Statistical models for earthquake occurrences and residual analysis for point processes, Journal of the American Statistical Association, 83: 9-27).
+- But an observation suggest nevertheless that another type of test could also be used...
+
+** A Brownian motion?
+#+name: mouvement-brownien-1
+#+header: :width 2000 :height 1700 :cache yes
+#+header: :file figs/mouvement-brownien-1.png
+#+BEGIN_SRC R :exports results :results output graphics
+ttS <- seq(0,max(cpsp1t$cpspFct()),len=501)
+par(cex=5,mar=c(5,5,1,1))
+plot(ttS,cpsp1t$cpspFct(ttS)-ttS,
+     type="l",lwd=5,col=2,
+     xlab="Λ",
+     ylab="N(Λ)-Λ"
+     )
+abline(h=0,lwd=2,lty=5)
+#+END_SRC
+
+#+RESULTS[7cc8c05bfa7eeb41010165c3e8c82e2416302b9e]: mouvement-brownien-1
+[[file:figs/mouvement-brownien-1.png]]
+
+* A test based on Donsker's theorem
+
+** Donsker's theorem and minimal area region
+- The intuition of the convergence---of a properly normalized version---of the process $N(\Lambda) - \Lambda$ towards a Brownian motion is correct.
+- This is an easy consequence of Donsker's theorem as Vilmos Prokaj explained to me on the =R= mailing and as Olivier Faugeras and Jonathan Touboul explained to me directly.
+- It is moreover possible to find regions of minimal area having a given probability to contain the whole trajectory of a canonical Brownian motion (Kendall, Marin et Robert, 2007; Loader et Deely, 1987).
+- We get thereby a new goodness of fit test.
+
+** Minimal area region at 95%
+#+name: region-de-prediction-de-Lambert
+#+header: :width 2000 :height 1700 :cache yes
+#+header: :file figs/region-de-prediction-de-Lambert.png
+#+BEGIN_SRC R :exports results :results output graphics
+ws2ld <- function(lambda,mu) c(a=as.vector(sqrt(lambda)),b=-as.vector(sqrt(lambda)/mu))
+ld2ws <- function(a,b) c(lambda=as.vector(a^2),mu=-as.vector(a/b))
+star2ws <- function(mu,sigma2) c(lambda=as.vector(1/sigma2),mu=as.vector(mu))
+ws2star <- function(lambda,mu) c(mu=as.vector(mu),sigma2=as.vector(1/lambda))
+
+dIG.ld <- function(t,a,b) a/sqrt(2*pi*t^3)*exp(-(a+b*t)^2/2/t)
+dIG.ws <- function(t,lambda,mu) sqrt(lambda/(2*pi*t^3))*exp(-0.5*lambda*(t-mu)^2/mu^2/t)
+
+rbm <- function(t=1,
+                h=0.0001,
+                drift) {
+    if (!is.function(drift)) {
+        result <- c(0,cumsum(rnorm(ceiling(t/h),drift*h,sqrt(h))))
+    } else {
+        n <- ceiling(t/h)
+        tt <- (1:n)*h
+        result <- c(0,cumsum(rnorm(n,drift(tt)*h,sqrt(h))))
+    }
+    attr(result,"h") <- h
+    attr(result,"drift") <- drift
+    class(result) <- "BrownianMotion"
+    result
+}
+
+plot.BrownianMotion <- function(x,y,...) {
+    
+    xx <- (0:(length(x)-1))*attr(x,"h")
+    plot(xx,x,type="l",...)
+}
+
+lines.BrownianMotion <- function(x,...) {
+    xx <- (0:(length(x)-1))*attr(x,"h")
+    lines(xx,x,...)
+}
+
+set.seed(135436,"Mersenne-Twister")
+bm100 <- lapply(1:100, function(i) rbm(drift=0))
+library(gsl)
+b95 <- function(x) sqrt(-lambert_Wm1(-(0.1052727*x)^2))*sqrt(x)
+xx <- (0:(length(bm100[[1]])-1))*attr(bm100[[1]],"h")
+myUBound2 <- b95(xx)
+myLBound2 <- -b95(xx)
+notInW95 <- sapply(bm100,function(b) any(abs(b)>myUBound2))
+par(cex=5,mar=c(5,5,5,1))
+plot(c(0,1),c(-3,3),type="n",
+     xlab="t",ylab="B(t)",
+     main="n = 100",xaxs="i",
+     yaxs="i")
+lines(xx,myUBound2,col=2,lwd=5)
+lines(xx,myLBound2,col=2,lwd=5)
+invisible(sapply(1:100,
+                 function(i)
+                 lines(bm100[[i]],col=ifelse(notInW95[i],4,1),lwd=2)
+                 )
+          )
+#+END_SRC
+
+#+RESULTS[3849bbb978bbeb392e41c3d0c73f49b2e30acd52]: region-de-prediction-de-Lambert
+[[file:figs/region-de-prediction-de-Lambert.png]]
+
+
+
+* Conditional intensity estimation
+** Back to our "tough" case (1)
+#+ATTR_LATEX: :width 0.7\textwidth
+#+RESULTS[6beb781ac8340ab362f50f6a27915c7256548295]: exemple-de-compteurs-en-regime-spont-complique-1
+[[file:figs/exemple-de-compteurs-en-regime-spont-complique-1.png]]
+
+** Back to our "tough" case (2)
+Our former exploratory analysis leads to a minimal the following model: $$\lambda(t | \mathcal{F}_t) = f(t-t_d,t_d-t_{ad})\, ,$$ where $t_d$ is the time of the last spike and $t_{ad}$ is the time of the one-before-the-last spike.
+
+This is known in the point process literature as a *Wold process*.
+
+** David Brillinger's approach
+- We follow D. Brillinger (1988) who starts by binning the time axis into bins of length $h$, where $h$ is small enough to observe at most one spike per bin.
+- We are therefore brought back to a *binomial regression* problem.
+- The binned data are then considered as an observation from a collection of Bernoulli random variables $\{Y_1,\ldots,Y_k\}$ with parameters: $f(t-t_d,t_d-t_{ad})\, h$.
+- We estimate in fact: $$\log \left( \frac{f(t-t_d,t_d-t_{ad}) \, h}{1-f(t-t_d,t_d-t_{ad}) \, h} \right) =  \eta(t-t_d,t_d-t_{ad})\, .$$
+     
+** The binned data
+#+BEGIN_EXAMPLE
+        event   time neuron  lN.1    i1
+  14604     0 58.412      1 0.012 0.016
+  14605     1 58.416      1 0.016 0.016
+  14606     0 58.420      1 0.004 0.016
+  14607     1 58.424      1 0.008 0.016
+  14608     0 58.428      1 0.004 0.008
+  14609     0 58.432      1 0.008 0.008
+  14610     1 58.436      1 0.012 0.008
+  14611     0 58.440      1 0.004 0.012
+#+END_EXAMPLE
+
+*event* is the binned spike train; *time* is the time at the center of the bin; *neuron* is the neuron to which *event* "belongs"; *lN.1* is t-t_d; *i1*  is t_d-t_{ad}. Here, $h$ was set to 4 ms.
+
+** Smoothing splines
+- Since cellular biophysics does not provide much guidance on how to build $\eta$ we have chosen to use *smoothing splines* (Wahba, 1990; Green and Silverman, 1994; Eubank, 1999; Gu, 2002).
+- Computations are performed with =gss= an =R= package developed by Chong Gu.
+- $\eta(t-t_d,t_d-t_{ad})$ is decomposed in a unique way in: $$\eta(t-t_d,t_d-t_{ad}) = \eta_{\emptyset} + \eta_1(t-t_d) + \eta_2(t_d-t_{ad}) + \eta_{1,2}(t-t_d,t_d-t_{ad}) \, ,$$ where the variables: $t-t_d$ and $t_d-t_{ad}$ have been linearly transformed such their domains are both the [0,1] interval.
+- The decomposition is made unique by imposing conditions like: $\int_0^1 \eta_i = 0$.
+
+* Fits and goodness of fit tests
+** A remark on the tests
+- Ogata's tests, like the proposed "Brownian motion test", assume that the $\Lambda$ use to transform the time is *independent of the data*.
+- But our $\hat{\Lambda}$ depends strongly on the data.
+- We therefore split our data sets in two parts, fit on one part and test on the other.
+- Our test level is then slightly lower than the nominal level (as explained by Reynaud-Bouret et al, 2014) since our $\hat{\Lambda}$ is slightly different (at best) from $\Lambda$.
+ 
+** Fit early / test late
+#+name: definition-fonction-graphe-uniforme-sur-Λ
+#+BEGIN_SRC R :exports none
+figUnifSurΛ <- function(CPSPsumObj,
+                        lwd=5,
+                        xlab = "Λ", 
+                        ylab = "N(Λ)",
+                        main = "Barnard's test",
+                        ...) {
+    cpsp <- eval(CPSPsumObj$call[[2]])
+    xx <- cpsp$ppspFct()
+    Y <- seq(xx)
+    nbSpikes <- length(xx)
+    
+    slopeKS <- nbSpikes/max(xx)
+    plot(as.numeric(xx), Y, type = "n",
+         xlab = xlab, 
+         ylab = ylab,
+         main = main,
+         ...)
+    abline(a = 0, b = slopeKS, lwd=lwd)
+    abline(a = 1.36 * sqrt(nbSpikes), slopeKS, lty = 2, lwd=lwd)
+    abline(a = -1.36 * sqrt(nbSpikes), slopeKS, lty = 2, lwd=lwd)
+    abline(a = 1.63 * sqrt(nbSpikes), slopeKS, lty = 2, lwd=lwd)
+    abline(a = -1.63 * sqrt(nbSpikes), slopeKS, lty = 2, lwd=lwd)
+    lines(as.numeric(xx), Y, col = 2, lwd = lwd)
+}
+#+END_SRC
+
+#+RESULTS: definition-fonction-graphe-uniforme-sur-Λ
+
+#+name: definition-fonction-graphe-Berman
+#+BEGIN_SRC R :exports none
+figBerman <- function(CPSPsumObj,
+                      lwd=5,
+                      xlab = expression(U[(k)]), 
+                      ylab = "EDF",
+                      main = "Berman's test", 
+                      ...) {
+    cpsp <- eval(CPSPsumObj$call[[2]])
+    xx <- cpsp$ppspFct()
+    Y <- seq(xx)
+    nbSpikes <- length(xx)
+    isi <- diff(xx)
+    U <-  1 - exp(-isi)
+    plot(c(0, 1), c(0, 1), type = "n",
+         xlab=xlab,ylab=ylab,
+         main=main,
+         ...)
+    abline(a = 0, b = 1, lwd=lwd)
+    abline(a = 1.36/sqrt(nbSpikes - 1), 1, lty = 2, lwd=lwd)
+    abline(a = -1.36/sqrt(nbSpikes - 1), 1, lty = 2, lwd=lwd)
+    abline(a = 1.63/sqrt(nbSpikes - 1), 1, lty = 2, lwd=lwd)
+    abline(a = -1.63/sqrt(nbSpikes - 1), 1, lty = 2, lwd=lwd)
+    lines(sort(U), (1:(nbSpikes - 1))/(nbSpikes - 1), 
+          col = 2, lwd = lwd)  
+}
+#+END_SRC
+
+#+RESULTS: definition-fonction-graphe-Berman
+
+#+name: definition-fonction-graphe-Brownien
+#+BEGIN_SRC R :exports none :results output
+figBrownien <- function(CPSPsumObj,
+                        lwd=5,
+                        xlab = "Λ/Λmax",
+                        ylab = "(N(Λ)-Λ)/√Λmax",
+                        main = "Brownian motion test",
+                        ...) {
+    cpsp <- eval(CPSPsumObj$call[[2]])
+    xx <- cpsp$ppspFct()
+    Y <- seq(xx)
+    nbSpikes <- length(xx)
+    isi <- diff(xx)
+    b95 <- function(t) 0.299944595870772 + 2.34797018726827 * sqrt(t)
+    b99 <- function(t) 0.313071417065285 + 2.88963206734397 *  sqrt(t)
+    y.w <- (xx - xx[1])[-1]
+    n <- length(y.w)
+    y.w <- c(0, (y.w - 1:n)/sqrt(n))
+    x.w <- (0:n)/n
+    tt <- seq(0, 1, 0.01)
+    ylim <- c(min(-b99(tt[length(tt)]), min(y.w)),
+              max(b99(tt[length(tt)]), max(y.w)))
+    plot(x.w, y.w, type = "n",
+         xlab=xlab,ylab=ylab,
+         ylim = ylim, main = main, 
+         xaxs = "i",yaxs = "i")
+    abline(h = 0,lwd=lwd)
+    lines(tt, b95(tt), lty = 2,lwd=lwd)
+    lines(tt, -b95(tt), lty = 2,lwd=lwd)
+    lines(tt, b99(tt), lty = 2,lwd=lwd)
+    lines(tt, -b99(tt), lty = 2,lwd=lwd)
+    lines(x.w, y.w, col = 2, lwd=lwd)
+}
+#+END_SRC
+
+#+RESULTS: definition-fonction-graphe-Brownien
+
+#+BEGIN_SRC R :exports none
+data(e060824spont)
+n1df <- mkGLMdf(e060824spont[[1]],0.004)
+n1dfe <- subset(n1df, time <= 28.5)
+n1dfe_brt_ecdf = ecdf(n1dfe$lN.1)
+n1dfe <- within(n1dfe,tBRT1 <- n1dfe_brt_ecdf(lN.1))
+n1dfe$i1 <- isi(n1dfe,lag=1)
+n1dfe <- n1dfe[complete.cases(n1dfe),]
+n1dfe_isi_ecdf = ecdf(n1dfe$i1)
+n1dfe <- within(n1dfe, ti1 <- n1dfe_isi_ecdf(i1)) 
+n1df.fit1.first.half <- gssanova(event ~ tBRT1*ti1, data=n1dfe, family="binomial", seed=20061001)
+n1dfl <- subset(n1df, time > 28.5)
+n1dfl_brt_ecdf = ecdf(n1dfl$lN.1)
+n1dfl <- within(n1dfl,tBRT1 <- n1dfl_brt_ecdf(lN.1))
+n1dfl$i1 <- isi(n1dfl,lag=1)
+n1dfl <- n1dfl[complete.cases(n1dfl),]
+n1dfl_isi_ecdf = ecdf(n1dfl$i1)
+n1dfl <- within(n1dfl, ti1 <- n1dfl_isi_ecdf(i1)) 
+n1df.fit1.second.half <- gssanova(event ~ tBRT1*ti1, data=n1dfl, family="binomial", seed=20061001)
+n1dfl4test = n1dfl[,c("event","lN.1","i1")]
+n1dfl4test <- within(n1dfl4test,tBRT1 <- n1dfe_brt_ecdf(lN.1))
+n1dfl4test = within(n1dfl4test, ti1 <- n1dfe_isi_ecdf(i1)) 
+n1TTel <- n1df.fit1.first.half %tt% n1dfl4test
+n1TTels <- summary(n1TTel)
+n1dfe4test = n1dfe[,c("event","lN.1","i1")]
+n1dfe4test <- within(n1dfe4test,tBRT1 <- n1dfl_brt_ecdf(lN.1))
+n1dfe4test = within(n1dfe4test, ti1 <- n1dfl_isi_ecdf(i1)) 
+n1TTle <- n1df.fit1.second.half %tt% n1dfe4test
+n1TTles <- summary(n1TTle)
+#+END_SRC
+
+#+RESULTS:
+
+#+BEGIN_SRC R :exports none
+summary.CountingProcessSamplePath <- function (object,
+                                               exact = TRUE,
+                                               lag.max = NULL,
+                                               d = max(c(2, sqrt(length(object$ppspFct()))%/%5)),
+                                               ...) {
+    x <- object$ppspFct()
+    n <- length(x)
+    xn <- (x - object$from)/(x[n] - object$from)
+    UniformGivenN <- ks.test(xn[-n], punif, exact = exact)$p.value
+    b95 <- function(t) 0.299944595870772 + 2.34797018726827 * 
+        sqrt(t)
+    b99 <- function(t) 0.313071417065285 + 2.88963206734397 * 
+        sqrt(t)
+    y.w <- (x - x[1])[-1]
+    ny <- length(y.w)
+    y.w <- (y.w - 1:ny)/sqrt(ny)
+    x.w <- (1:ny)/ny
+    Wiener95 <- all(-b95(x.w) < y.w & y.w < b95(x.w))
+    Wiener99 <- all(-b99(x.w) < y.w & y.w < b99(x.w))
+    xs <- sort(diff(x))
+    BermanTest <- ks.test(xs, pexp, exact = exact)$p.value
+    isi <- diff(x)
+    isi.o <- rank(isi)/length(isi)
+    isi.l <- length(isi)
+    if (is.null(lag.max)) 
+        lag.max <- round(10 * log10(isi.l))
+    lag.max <- min(isi.l - 1, lag.max)
+    grid <- seq(0, 1, length.out = d + 1)
+    getChi2 <- function(lag) {
+        isi.x <- isi.o[1:(isi.l - lag.max)]
+        isi.y <- isi.o[(1 + lag):(isi.l - lag.max + lag)]
+        isi.x <- as.integer(cut(isi.x, breaks = grid))
+        isi.y <- as.integer(cut(isi.y, breaks = grid))
+        counts <- matrix(0, nrow = d, ncol = d)
+        for (i in seq(along.with = isi.x)) counts[isi.x[i], isi.y[i]] <- counts[isi.x[i], 
+                          isi.y[i]] + 1
+        chisq.test(counts, ...)
+    }
+    chi2seq <- lapply(1:lag.max, getChi2)
+    chi2.df <- chi2seq[[1]]$parameter
+    chi2V <- sapply(chi2seq, function(l) l$statistic)
+    chi2.w <- cumsum((chi2V - chi2.df)/sqrt(2 * chi2.df * lag.max))
+    chi2.95 <- all(abs(chi2.w) < b95((1:lag.max)/lag.max))
+    chi2.99 <- all(abs(chi2.w) < b99((1:lag.max)/lag.max))
+    result <- list(UniformGivenN = UniformGivenN, Wiener95 = Wiener95, 
+                   Wiener99 = Wiener99, BermanTest = BermanTest, RenewalTest = list(chi2.95 = chi2.95, 
+                                                                     chi2.99 = chi2.99, total = lag.max), n = n, call = match.call())
+    class(result) <- "CountingProcessSamplePath.summary"
+    result
+}
+
+print.CountingProcessSamplePath.summary <- function (x, digits = 5, ...) {
+    cat(paste(" *** Test of uniformity on the time axis \n", 
+              "    Prob. of the Kolmogorov statistic under H0:", round(x$UniformGivenN, 
+                                                                       digits = digits), "\n"))
+    cat(paste(" *** Wiener process test \n", "    Inside 95% domain:", 
+              x$Wiener95, ", inside 99% domain:", x$Wiener99, "\n"))
+    cat(paste(" *** Berman test  \n", "    Prob. of the Kolmogorov statistic under H0:", 
+              round(x$BermanTest, digits = digits), "\n"))
+    cat(paste(" *** Renewal test \n", "    Inside 95% domain:", 
+              x$RenewalTest[["chi2.95"]], ", inside 99% domain:", x$RenewalTest[["chi2.99"]], 
+              "\n", "    Maximum lag:", x$RenewalTest[["total"]], "\n"))
+    total <- x$varianceTimeSummary["total"]
+    out95 <- x$varianceTimeSummary["out95"]
+    out99 <- x$varianceTimeSummary["out99"]
+    cat(paste(" *** The object contains", x$n, "events.\n"))
+}
+#+END_SRC
+
+#+RESULTS:
+
+#+name: figure-test-model-avec-interaction-ajustement-debut
+#+header: :width 5000 :height 2500 :cache yes
+#+header: :file figs/figure-test-model-avec-interaction-ajustement-debut.png
+#+BEGIN_SRC R :exports results :results output graphics
+layout(matrix(1:3,nc=3))
+par(cex=7,mar=c(5,5,5,1))
+figUnifSurΛ(n1TTels,lwd=7)
+figBerman(n1TTels,lwd=7)
+figBrownien(n1TTels,lwd=7)
+#+END_SRC
+
+#+RESULTS[f8202447ec29c6e1c58001b03f30b916a2d00c8d]: figure-test-model-avec-interaction-ajustement-debut
+[[file:figs/figure-test-model-avec-interaction-ajustement-debut.png]]
+
+
+
+The model is: $\eta(t-t_d,t_d-t_{ad}) = \eta_{\emptyset} + \eta_1(t-t_d) + \eta_2(t_d-t_{ad}) + \eta_{1,2}(t-t_d,t_d-t_{ad})$.
+
+** Fit late / test early
+#+name: figure-test-model-avec-interaction-ajustement-fin
+#+header: :width 5000 :height 2500 :cache yes
+#+header: :file figs/figure-test-model-avec-interaction-ajustement-fin.png
+#+BEGIN_SRC R :exports results :results output graphics
+layout(matrix(1:3,nc=3))
+par(cex=7,mar=c(5,5,5,1))
+figUnifSurΛ(n1TTles,lwd=7)
+figBerman(n1TTles,lwd=7)
+figBrownien(n1TTles,lwd=7)
+#+END_SRC
+
+#+RESULTS[dba43441546c843625cfdcc793cb5d7c56eb313c]: figure-test-model-avec-interaction-ajustement-fin
+[[file:figs/figure-test-model-avec-interaction-ajustement-fin.png]]
+
+
+
+** Data and $\hat{\lambda}$
+
+#+name: prediction-de-la-fin-modele-avec-interaction
+#+BEGIN_SRC R :exports none :results output silent
+η1d <- predict(n1df.fit1.first.half,
+               newdata=n1dfl4test)
+tigol <- function(x) exp(x)/(1+exp(x))
+λ1d <- tigol(η1d)/0.004
+#+END_SRC
+
+#+name: fig-donnees-avec-lambda-chapeau
+#+header: :width 2000 :height 1700 :cache yes
+#+header: :file figs/fig-donnees-avec-lambda-chapeau.png
+#+BEGIN_SRC R :exports results :results output graphics
+temps <- with(n1dfl,time)
+PA <- with(n1dfl,event)
+bonTps <- 30.5 <= temps & temps <= 32
+temps <- temps[bonTps]
+PA <- PA[bonTps]
+idxPA <- (1:length(PA))[PA == 1]
+idx <- idxPA+1
+nPA <- length(idxPA)
+λ <- λ1d[bonTps]
+par(cex=7,mar=c(5,5,1,1))
+plot(temps, λ,type="n",
+     xlab="Time (s)",
+     ylab="λ (Hz)",
+     ylim=c(0,55))
+lines(temps[1:idxPA[1]],λ[1:idxPA[1]],col="red",lwd=5)
+for (i in 1:(nPA-1)) lines(temps[idx[i]:idxPA[i+1]],λ[idx[i]:idxPA[i+1]],col="red",lwd=5)
+lines(temps[idx[nPA]:length(temps)],λ[idx[nPA]:length(temps)],col="red",lwd=5)
+abline(h=0,lwd=3,col="grey70")
+rug(temps[idxPA],lwd=5)
+#+END_SRC
+
+#+RESULTS[c96227c95b25ae76ac348075cfd1d9a002a737f6]: fig-donnees-avec-lambda-chapeau
+[[file:figs/fig-donnees-avec-lambda-chapeau.png]]
+
+
+
+** Conclusions
+- We can now routinely estimate the conditional intensity of our spike trains.
+- We can include interactions between neurons as well as stimulations' response in our models.
+- We systematically pass much tougher tests than our competitors.
+- The difficult question of model choice has not been touched upon here but we have a solution---even if computationally expensive.
+- You can try all that out with the =STAR= package available on =CRAN= (a =Python= version is in development). 
+
+** Thank you!
+I want to thank:
+- Antoine Chaffiol who recorded the data and did the spike sorting.
+- Chong Gu who developed =gss=: my main collaborator on this project.
+- Vilmos Prokaj, Olivier Faugeras and Jonathan Touboul who pointed out Donsker's theorem to me.
+- Clément Léna and Yann-Suhan Senova for testing =STAR= on their data.
+- Lyle Graham and Angelo Iollo for inviting me.
+- You guys for listening.
